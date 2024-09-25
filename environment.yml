@@ -1,4 +1,4 @@
-name: rule-of-thumb-test
+name: rule-of-thumb
 channels:
   - conda-forge
 
@@ -6,8 +6,9 @@ dependencies:
   - python==3.10
   - matplotlib
   - jax>=0.4.31
-  - ptarcade==1.1.0
   - quadax~=0.2
   - scipy~=1.13
+  - pip
   - pip:
       - netket>=3.14
+      - git+https://github.com/davecwright3/PTArcade.git@feat/jax-utilities
