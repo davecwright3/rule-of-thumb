@@ -1,0 +1,436 @@
+diff --color -x '.*' -Naur models_1.0.1/dw_ds.py models/dw_ds.py
+--- models_1.0.1/dw_ds.py	2023-06-26 16:24:47.994353533 -0700
++++ models/dw_ds.py	2024-04-10 15:35:57.000000000 -0700
+@@ -1,9 +1,9 @@
+ import ptarcade.models_utils as aux
+-import numpy as np
++import jax.numpy as np
+ 
+-name = "dw_ds" 
++name = "dw_ds"
+ 
+-smbhb = False 
++smbhb = False
+ 
+ parameters = {
+     "log10_N_eff": aux.prior("Uniform", -3, np.log10(0.39)),
+@@ -19,7 +19,7 @@
+     return (a + b) ** c / (b * x ** (-a / c) + a * x ** (b / c)) ** c
+ 
+ 
+-def spectrum(f, log10_N_eff, log10_T_star, b, c):
++def spectrum(f, log10_N_eff, log10_T_star, b, c, **kwargs):
+     """
+     | Returns the GW energy density as a fraction of the
+     | closure density as a function of the parameters of the
+@@ -33,9 +33,9 @@
+     N_eff = 10**log10_N_eff
+     T_star = 10**log10_T_star
+ 
+-    gs_eq = aux.g_s(aux.T_eq)
+-    gs_star = aux.g_s(T_star)
+-    g_star = aux.g_rho(T_star)
++    gs_eq = aux.g_s_jax(aux.T_eq)
++    gs_star = aux.g_s_jax(T_star)
++    g_star = aux.g_rho_jax(T_star)
+ 
+     alpha = N_eff / (13.6 * g_star / gs_star ** (4 / 3))
+ 
+diff --color -x '.*' -Naur models_1.0.1/dw_sm.py models/dw_sm.py
+--- models_1.0.1/dw_sm.py	2023-06-26 16:25:57.723306775 -0700
++++ models/dw_sm.py	2024-04-10 15:36:11.000000000 -0700
+@@ -1,5 +1,5 @@
+ import ptarcade.models_utils as aux
+-import numpy as np
++import jax.numpy as np
+ 
+ name = "dw_sm" 
+ 
+@@ -20,7 +20,7 @@
+     return (a + b) ** c / (b * x ** (-a / c) + a * x ** (b / c)) ** c
+ 
+ 
+-def spectrum(f, log10_alpha, log10_T_star, b, c):
++def spectrum(f, log10_alpha, log10_T_star, b, c, **kwargs):
+     """
+     | Returns the GW energy density as a fraction of the
+     | closure density as a function of the parameters of the
+@@ -34,9 +34,9 @@
+     alpha = 10**log10_alpha
+     T_star = 10**log10_T_star
+ 
+-    gs_eq = aux.g_s(aux.T_eq)
+-    gs_star = aux.g_s(T_star)
+-    g_star = aux.g_rho(T_star)
++    gs_eq = aux.g_s_jax(aux.T_eq)
++    gs_star = aux.g_s_jax(T_star)
++    g_star = aux.g_rho_jax(T_star)
+ 
+     epsilon = 0.7
+ 
+diff --color -x '.*' -Naur models_1.0.1/igw.py models/igw.py
+--- models_1.0.1/igw.py	2023-06-26 11:38:24.900464654 -0700
++++ models/igw.py	2024-09-23 13:02:34.026957458 -0700
+@@ -1,5 +1,6 @@
+ import ptarcade.models_utils as aux
+-import numpy as np
++import jax.numpy as np
++import jax
+ 
+ name = 'igw'
+ 
+@@ -39,7 +40,7 @@
+     return r * aux.A_s * (f / aux.f_cmb)**n_t
+ 
+ 
+-def spectrum(f, n_t, log10_r, log10_T_rh):
++def spectrum(f, n_t, log10_r, log10_T_rh, **kwargs):
+     """Calculate GW energy density.
+ 
+     Returns the GW energy density as a fraction of the closure density as a
+@@ -55,14 +56,24 @@
+ 
+     r = 10**log10_r
+     T_rh = 10**log10_T_rh
+-    f_rh = aux.freq_at_temp(T_rh)
++    f_rh = aux.freq_at_temp_jax(T_rh)
+ 
+     # Create a a copy of f. Replace each value where f > f_rh with f_rh
+     f_constr = np.where(f <= f_rh, f, f_rh)
++    g_rho = aux.g_rho_jax(f_constr, is_freq=True)
++    g_s = aux.g_s_jax(f_constr, is_freq=True)
++    g_s_0_g_s = (aux.g_s_0 / g_s)
+ 
+     prefactor = (
+-        (aux.omega_r / 24) * (aux.g_rho(f_constr, is_freq=True) / aux.g_rho_0) *
+-        (aux.g_s_0 / aux.g_s(f_constr, is_freq=True))**(4/3)
++        (aux.omega_r / 24) * ( g_rho / aux.g_rho_0) *
++        g_s_0_g_s**(4/3)
+         )
+ 
++    N_rh = 10.0
++    f_end = (0.5 * (aux.g_s_0 / aux.g_s_jax(f_rh, is_freq=True))**(1/3) * np.sqrt(aux.g_rho_jax(f_rh, is_freq=True) / 90)
++             * T_rh * aux.T_0 / aux.M_pl * np.exp(N_rh / 2) * aux.gev_to_hz)
++
++    #jax.debug.print("{f_end}", f_end=f_end)
++    f = np.where(f<=f_end, f, 0.0)
++
+     return aux.h**2 * prefactor * power_spec(f, n_t, r) * transfer_func(f, f_rh)
+diff --color -x '.*' -Naur models_1.0.1/meta_l.py models/meta_l.py
+--- models_1.0.1/meta_l.py	2023-06-26 11:38:09.821944594 -0700
++++ models/meta_l.py	2024-03-25 13:03:19.000000000 -0700
+@@ -14,5 +14,5 @@
+ cwd = os.path.dirname(os.path.abspath(__file__))
+ log_spectrum = aux.spec_importer(cwd +'/models_data/meta_l.h5')
+ 
+-def spectrum(f, log10_Gmu, sqrt_kappa):
++def spectrum(f, log10_Gmu, sqrt_kappa, **kwargs):
+     return 10**log_spectrum(np.log10(f), log10_Gmu=log10_Gmu, sqrt_kappa=sqrt_kappa)
+diff --color -x '.*' -Naur models_1.0.1/meta_ls.py models/meta_ls.py
+--- models_1.0.1/meta_ls.py	2023-06-26 11:37:56.682992816 -0700
++++ models/meta_ls.py	2024-06-19 08:40:35.723728813 -0700
+@@ -15,5 +15,6 @@
+ cwd = os.path.dirname(os.path.abspath(__file__))
+ log_spectrum = aux.spec_importer(cwd +'/models_data/meta_ls.h5')
+ 
+-def spectrum(f, log10_Gmu, sqrt_kappa):
++def spectrum(f, log10_Gmu, sqrt_kappa,**kwargs):
++    print(f)
+     return 10**log_spectrum(np.log10(f), log10_Gmu=log10_Gmu, sqrt_kappa=sqrt_kappa)
+diff --color -x '.*' -Naur models_1.0.1/pt_bubble.py models/pt_bubble.py
+--- models_1.0.1/pt_bubble.py	2023-06-26 11:37:04.296981215 -0700
++++ models/pt_bubble.py	2024-09-24 14:25:08.214420915 -0700
+@@ -1,6 +1,6 @@
+ import ptarcade.models_utils as aux
+-from scipy.special import gamma
+-import numpy as np
++from jax.scipy.special import gamma
++import jax.numpy as np
+ 
+ name = 'pt_bubble'
+ 
+@@ -21,12 +21,12 @@
+     | Spectral shape as a functino of x=f/f_peak
+     """
+     return (a + b)**c / (b * x**(-a/c) + a * x**(b/c))**c
+-    
+ 
+ 
+-def spectrum(f, log10_alpha, log10_T_star, log10_H_R, a, b, c):
++
++def spectrum(f, log10_alpha, log10_T_star, log10_H_R, a, b, c, **kwargs):
+     """
+-    | Returns the GW energy density as a fraction of the 
++    | Returns the GW energy density as a fraction of the
+     | closure density as a function of the parameters of the
+     | model:
+     |   - f
+@@ -35,22 +35,22 @@
+     |   - log10(H*R)
+     |   - spectral shape parameters a,b,c
+     """
+-    
++
+     alpha = 10**log10_alpha
+     T_star = 10**log10_T_star
+     H_R = 10**log10_H_R
+ 
+     H_beta = H_R * (8 * np.pi)**(-1/3)
+-    
++
+     delta = 0.48 / (1 + 5.3 + 5) # velocity factor from 1605.01403
+     f_peak = 0.35 / (1+ 0.69 +0.069) # peak frequency at emission (beta norm.) from 1605.01403
+-    p = 2 # alpha coefficient 
+-    q = 2 # rate coefficient 
+-    kappa = 1 # efficiency factor 
+-
+-    g_s_eq = aux.g_s(aux.T_eq) # number of entropic relativistic dof at equality
+-    g_s_star = aux.g_s(T_star) # number of entropic relativistic dof at time of emission
+-    g_star = aux.g_rho(T_star) # number of relativistic dof at time of emission
++    p = 2 # alpha coefficient
++    q = 2 # rate coefficient
++    kappa = 1 # efficiency factor
++
++    g_s_eq = aux.g_s_jax(aux.T_eq) # number of entropic relativistic dof at equality
++    g_s_star = aux.g_s_jax(T_star) # number of entropic relativistic dof at time of emission
++    g_star = aux.g_rho_jax(T_star) # number of relativistic dof at time of emission
+ 
+     # normalization factor
+     n = (a+b)/c
+@@ -61,13 +61,13 @@
+             / (n * gamma(c))
+     )
+ 
+-    # dilution factor 
++    # dilution factor
+     dil = (
+             np.pi**2 / 90
+             * g_star * (g_s_eq / g_s_star)**(4/3)
+             * aux.T_0**4 / (aux.M_pl * aux.H_0)**2
+             )
+-   
++
+ 
+     # peak frequncy today in Hz
+     f_0 = (
+@@ -86,4 +86,3 @@
+             * (kappa * alpha / (1 + alpha)) ** p
+             * S(f / f_0, a, b, c)
+             )
+-
+diff --color -x '.*' -Naur models_1.0.1/pt_sound.py models/pt_sound.py
+--- models_1.0.1/pt_sound.py	2023-06-26 11:36:50.345621586 -0700
++++ models/pt_sound.py	2024-09-23 13:02:34.026957458 -0700
+@@ -1,6 +1,6 @@
+ import ptarcade.models_utils as aux
+-from scipy.special import gamma
+-import numpy as np
++from jax.scipy.special import gamma
++import jax.numpy as np
+ 
+ name = 'pt_sound'
+ 
+@@ -22,7 +22,7 @@
+     """
+     return (a + b)**c / (b * x**(-a/c) + a * x**(b/c))**c
+ 
+-def spectrum(f, log10_alpha, log10_T_star, log10_H_R, a, b, c):
++def spectrum(f, log10_alpha, log10_T_star, log10_H_R, a, b, c, **kwargs):
+     """
+     | Returns the GW energy density as a fraction of the 
+     | closure density as a function of the parameters of the
+@@ -46,9 +46,9 @@
+     q = 1 # rate coefficient 
+     kappa = alpha / (0.73 + 0.083 * alpha**(1/2) + alpha) # efficiency factor assuming v~1
+     
+-    g_s_eq = aux.g_s(aux.T_eq) # number of entropic relativistic dof at equality
+-    g_s_star = aux.g_s(T_star) # number of entropic relativistic dof at time of emission
+-    g_star = aux.g_rho(T_star) # number of relativistic dof at time of emission
++    g_s_eq = aux.g_s_jax(aux.T_eq) # number of entropic relativistic dof at equality
++    g_s_star = aux.g_s_jax(T_star) # number of entropic relativistic dof at time of emission
++    g_star = aux.g_rho_jax(T_star) # number of relativistic dof at time of emission
+ 
+     # sound wave lifetime suppression, taken from 2007.08537
+     U_sq = 3/4 * kappa * alpha / (1 + alpha)
+@@ -80,7 +80,7 @@
+             * aux.gev_to_hz
+             )
+ 
+-    return (norm 
++    return (1/norm
+             * aux.h**2 * dil * supp
+             * delta
+             * (H_beta)**q
+diff --color -x '.*' -Naur models_1.0.1/sigw_box.py models/sigw_box.py
+--- models_1.0.1/sigw_box.py	2023-06-26 11:36:37.249733925 -0700
++++ models/sigw_box.py	2024-04-29 10:51:18.322483881 -0700
+@@ -3,21 +3,22 @@
+ import os
+ import numpy as np
+ import ptarcade.models_utils as aux
++import jax.numpy as jnp
+ 
+ name = 'sigw_box'
+ 
+ smbhb = False
+ 
+ parameters = {
++    'log10_A' : aux.prior("Uniform", -3,1),
+     'log10_fmin' : aux.prior("Uniform", -11, -5),
+     'log10_fmax' : aux.prior("Uniform", -11, -5),
+-    'log10_A' : aux.prior("Uniform", -3,1),
+     }
+ 
+ cwd = os.path.dirname(os.path.abspath(__file__))
+ spectrum_file = aux.spec_importer(cwd + '/models_data/sigw_box.h5')
+ 
+-def spectrum(f, log10_A, log10_fmin , log10_fmax):
++def spectrum(f, log10_A, log10_fmax, log10_fmin, **kwargs):
+     
+     """Calculate GW energy density.
+ 
+@@ -35,8 +36,8 @@
+     A = 10**log10_A
+ 
+     prefactor = ( # assumes f_reheating > f 
+-        (aux.omega_r) * (aux.g_rho(f, is_freq=True) / aux.g_rho_0) *
+-        (aux.g_s_0 / aux.g_s(f, is_freq=True))**(4/3)
++        (aux.omega_r) * (aux.g_rho_jax(f, is_freq=True) / aux.g_rho_0) *
++        (aux.g_s_0 / aux.g_s_jax(f, is_freq=True))**(4/3)
+         )
+     
+-    return aux.h**2 * A**2 * prefactor * 10**spectrum_file(np.log10(f), log10_fmin = log10_fmin, log10_fmax = log10_fmax)
++    return aux.h**2 * A**2 * prefactor * 10**spectrum_file(jnp.log10(f), log10_fmin = log10_fmin, log10_fmax = log10_fmax)
+diff --color -x '.*' -Naur models_1.0.1/sigw_delta.py models/sigw_delta.py
+--- models_1.0.1/sigw_delta.py	2023-06-26 11:36:24.942857742 -0700
++++ models/sigw_delta.py	2024-04-29 10:45:05.503532052 -0700
+@@ -3,6 +3,9 @@
+ import os
+ import numpy as np
+ import ptarcade.models_utils as aux
++import jax.numpy as jnp
++import jax
++jax.config.update("jax_enable_x64", True)
+ 
+ name = 'sigw_delta'
+ 
+@@ -13,7 +16,7 @@
+     'log10_A':aux.prior("Uniform", -3,1),
+     }
+ 
+-def spectrum(f: float, log10_f_peak: float, log10_A: float) -> float:
++def spectrum(f: float, log10_A: float, log10_f_peak: float,  **kwargs) -> float:
+     
+     """Calculate GW energy density.
+ 
+@@ -36,13 +39,13 @@
+     common = (2 - 3 * f_s**2)
+ 
+     factor1 = 3 / 64 * f_s**2 * (1 - f_s**2 / 4)**2
+-    factor2 = common**2 * np.heaviside(2-f_s, 0)
+-    factor3 = common**2 * np.pi**2 * np.heaviside(2 - np.sqrt(3) * f_s, 0)
+-    factor4 = common * np.log( np.abs( 1 - 4 / (3 * f_s**2) ) ) - 4
++    factor2 = common**2 * jnp.heaviside(2-f_s, 0)
++    factor3 = common**2 * jnp.pi**2 * jnp.heaviside(2 - np.sqrt(3) * f_s, 0)
++    factor4 = common * jnp.log( jnp.abs( 1 - 4 / (3 * f_s**2) ) ) - 4
+     
+     prefactor = ( # assumes f_reheating > f 
+-        (aux.omega_r) * (aux.g_rho(f, is_freq=True) / aux.g_rho_0) *
+-        (aux.g_s_0 / aux.g_s(f, is_freq=True))**(4/3)
++        (aux.omega_r) * (aux.g_rho_jax(f, is_freq=True) / aux.g_rho_0) *
++        (aux.g_s_0 / aux.g_s_jax(f, is_freq=True))**(4/3)
+         )
+   
+ 
+diff --color -x '.*' -Naur models_1.0.1/sigw_gauss.py models/sigw_gauss.py
+--- models_1.0.1/sigw_gauss.py	2023-06-26 11:36:10.438986540 -0700
++++ models/sigw_gauss.py	2024-04-29 17:46:48.010679999 -0700
+@@ -3,21 +3,22 @@
+ import os
+ import numpy as np
+ import ptarcade.models_utils as aux
++import jax.numpy as jnp
+ 
+ name = 'sigw_gauss'
+ 
+ smbhb = False
+ 
+ parameters = {
+-    'log10_fpeak' : aux.prior("Uniform", -11, -5),
+-    'width' : aux.prior("Uniform", 0.1,3),
+     'log10_A' : aux.prior("Uniform", -3,1),
++    'width' : aux.prior("Uniform", 0.1,3),
++    'log10_fpeak' : aux.prior("Uniform", -11, -5),
+     }
+ 
+ cwd = os.path.dirname(os.path.abspath(__file__))
+ spectrum_file = aux.spec_importer(cwd +'/models_data/sigw_gauss.h5')
+ 
+-def spectrum(f,log10_A, width,log10_fpeak):
++def spectrum(f, log10_A, log10_fpeak, width, **kwargs):
+     
+     
+     """Calculate GW energy density.
+@@ -36,9 +37,9 @@
+     A = 10**log10_A
+     
+     prefactor = ( # assumes f_reheating > f 
+-        (aux.omega_r) * (aux.g_rho(f, is_freq=True) / aux.g_rho_0) *
+-        (aux.g_s_0 / aux.g_s(f, is_freq=True))**(4/3)
++        (aux.omega_r) * (aux.g_rho_jax(f, is_freq=True) / aux.g_rho_0) *
++        (aux.g_s_0 / aux.g_s_jax(f, is_freq=True))**(4/3)
+         )
+      
+     
+-    return aux.h**2 * A**2 * prefactor * 10**spectrum_file(np.log10(f), width = width, log10_fpeak = log10_fpeak)
++    return aux.h**2 * A**2 * prefactor * 10**spectrum_file(jnp.log10(f), width = width, log10_fpeak = log10_fpeak)
+diff --color -x '.*' -Naur models_1.0.1/stable_c.py models/stable_c.py
+--- models_1.0.1/stable_c.py	2023-06-26 11:35:45.465592027 -0700
++++ models/stable_c.py	2024-03-25 13:36:51.000000000 -0700
+@@ -13,5 +13,5 @@
+ cwd = os.path.dirname(os.path.abspath(__file__))
+ log_spectrum = aux.spec_importer(cwd +'/models_data/stable_c.h5')
+ 
+-def spectrum(f, log10_Gmu):
++def spectrum(f, log10_Gmu, **kwargs):
+     return 10**log_spectrum(np.log10(f), log10_Gmu=log10_Gmu)
+diff --color -x '.*' -Naur models_1.0.1/stable_k.py models/stable_k.py
+--- models_1.0.1/stable_k.py	2023-06-26 11:35:19.478599429 -0700
++++ models/stable_k.py	2024-03-25 13:37:00.000000000 -0700
+@@ -15,5 +15,5 @@
+ cwd = os.path.dirname(os.path.abspath(__file__))
+ log_spectrum = aux.spec_importer(cwd +'/models_data/stable_k.h5')
+ 
+-def spectrum(f, log10_Gmu):
++def spectrum(f, log10_Gmu, **kwargs):
+     return 10**log_spectrum(np.log10(f), log10_Gmu=log10_Gmu)
+diff --color -x '.*' -Naur models_1.0.1/stable_m.py models/stable_m.py
+--- models_1.0.1/stable_m.py	2023-06-26 11:34:56.535329223 -0700
++++ models/stable_m.py	2024-03-25 13:37:10.000000000 -0700
+@@ -15,5 +15,5 @@
+ cwd = os.path.dirname(os.path.abspath(__file__))
+ log_spectrum = aux.spec_importer(cwd +'/models_data/stable_m.h5')
+ 
+-def spectrum(f, log10_Gmu):
++def spectrum(f, log10_Gmu, **kwargs):
+     return 10**log_spectrum(np.log10(f), log10_Gmu=log10_Gmu)
+diff --color -x '.*' -Naur models_1.0.1/stable_n.py models/stable_n.py
+--- models_1.0.1/stable_n.py	2023-06-26 11:34:42.128897786 -0700
++++ models/stable_n.py	2024-03-25 13:37:17.000000000 -0700
+@@ -15,5 +15,5 @@
+ cwd = os.path.dirname(os.path.abspath(__file__))
+ log_spectrum = aux.spec_importer(cwd +'/models_data/stable_n.h5')
+ 
+-def spectrum(f, log10_Gmu):
++def spectrum(f, log10_Gmu, **kwargs):
+     return 10**log_spectrum(np.log10(f), log10_Gmu=log10_Gmu)
+diff --color -x '.*' -Naur models_1.0.1/super.py models/super.py
+--- models_1.0.1/super.py	2023-06-26 11:34:15.581492782 -0700
++++ models/super.py	2024-03-25 13:50:07.000000000 -0700
+@@ -16,5 +16,5 @@
+ cwd = os.path.dirname(os.path.abspath(__file__))
+ log_spectrum = aux.spec_importer(cwd +'/models_data/super.h5')
+ 
+-def spectrum(f, log10_Gmu, log10_P):
++def spectrum(f, log10_Gmu, log10_P, **kwargs):
+     return 10**log_spectrum(np.log10(f), log10_Gmu=log10_Gmu, log10_P=log10_P)
