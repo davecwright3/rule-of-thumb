@@ -8,11 +8,13 @@ Then, you can apply my patch to make these modules JAX compatible. Assuming you 
 patch --directory models_1.0.1 -p1 < models_patch.diff
 ```
 ## Python environment
-You can use the `environment.yml` file to recreate the python environment you'll need to run the code.
+You can use the `pyproject.toml` + `pixi.lock` files to recreate the python environment you'll need to run the code.
 
+Running
 ``` sh
-conda env create -f environment.yml
+pixi shell
 ```
+will download the pinned packages from `pixi.lock` and activate a Python environment with them installed.
 
 ## Run the code
 The `models_1.0.1` directory you downloaded should be renamed to `models`. It also needs to be in the same directory as the script/notebook.

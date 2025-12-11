@@ -4,25 +4,20 @@ import jax
 
 jax.config.update("jax_enable_x64", True)
 import pathlib
-from collections.abc import Callable
-from typing import Sequence
+from collections.abc import Callable, Sequence
 
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
-import netket
 from jax.tree_util import Partial
 from matplotlib import cm
 from matplotlib.tri import Triangulation
-from scipy.interpolate import LinearNDInterpolator
-from scipy.spatial import Delaunay
 from scipy.stats import qmc
 
 
 def wrapper(
-    function: Callable, domain: jnp.ndarray, func_args: Sequence
+    function: Callable, domain: jnp.ndarray, func_args: Sequence,
 ) -> jnp.ndarray:
-    """
-    Wrapper function to apply the given function to the domain and return the maximum along the first axis.
+    """Wrapper function to apply the given function to the domain and return the maximum along the first axis.
 
     Parameters
     ----------
@@ -37,16 +32,16 @@ def wrapper(
     -------
     jnp.ndarray
         The maximum value of the function output along the first axis.
+
     """
     data = function(domain, *func_args)
     return jnp.max(data, axis=0)
 
 
 def create_vmap_function(
-    function: Callable, domain: jnp.ndarray, chunk_size: float = jnp.inf
+    function: Callable, domain: jnp.ndarray, batch_size: int | None = None,
 ) -> Callable:
-    """
-    Create a vectorized and JIT-compiled version of the given function using netket.jax.vmap_chunked.
+    """Create a vectorized and JIT-compiled version of max(function) using jax.lax.map_batched.
 
     Parameters
     ----------
@@ -54,24 +49,24 @@ def create_vmap_function(
         The function to be vectorized and JIT-compiled.
     domain : jnp.ndarray
         The input domain to be passed to the function.
-    chunk_size : float, optional
-        The chunk size for vectorization. Default is jnp.inf (no chunking).
+    batch_size : int, optional
+        The batch size for vectorization. Default is jnp.inf (no batching).
 
     Returns
     -------
     Callable
         The vectorized and JIT-compiled version of the input function.
+
     """
     return jax.jit(
-        netket.jax.vmap_chunked(
-            Partial(wrapper, function, domain), in_axes=0, chunk_size=chunk_size
-        )
+        lambda xs: jax.lax.map(
+            f=Partial(wrapper, function, domain), batch_size=batch_size, xs=xs,
+        ),
     )
 
 
-def create_sampler(d: int = 3) -> qmc.LatinHypercube:
-    """
-    Create a Latin Hypercube sampler with the specified dimension.
+def create_sampler(d: int = 3, rng=None) -> qmc.LatinHypercube:
+    """Create a Latin Hypercube sampler with the specified dimension.
 
     Parameters
     ----------
@@ -82,15 +77,15 @@ def create_sampler(d: int = 3) -> qmc.LatinHypercube:
     -------
     qmc.LatinHypercube
         The Latin Hypercube sampler instance.
+
     """
-    return qmc.LatinHypercube(d=d, strength=2)
+    return qmc.LatinHypercube(d=d, strength=2, rng=rng)
 
 
 def get_samples(
-    sampler: qmc.LatinHypercube, n: int, l_bounds: Sequence, u_bounds: Sequence
+    sampler: qmc.LatinHypercube, n: int, l_bounds: Sequence, u_bounds: Sequence,
 ) -> jnp.ndarray:
-    """
-    Generate samples from the given Latin Hypercube sampler and scale them to the specified bounds.
+    """Generate samples from the given Latin Hypercube sampler and scale them to the specified bounds.
 
     Parameters
     ----------
@@ -107,6 +102,7 @@ def get_samples(
     -------
     jnp.ndarray
         The generated and scaled samples.
+
     """
     sample = sampler.random(n=n)
     return qmc.scale(sample, l_bounds, u_bounds)
@@ -119,8 +115,7 @@ def integrate(
     func_args: Sequence,
     **kwargs,
 ) -> float:
-    """
-    Integrate a function over the given ln(domain) using a specified integrator.
+    """Integrate a function over the given ln(domain) using a specified integrator.
 
     Parameters
     ----------
@@ -139,6 +134,7 @@ def integrate(
     -------
     float
         The integral of the function over the given domain.
+
     """
     integrand = function(domain, *func_args) / domain
     return integrator(integrand, **kwargs)
@@ -148,11 +144,10 @@ def create_vmap_integrator(
     integrator: Callable,
     function: Callable,
     domain: jnp.ndarray,
-    chunk_size: float = jnp.inf,
-    integrator_kwargs = {},
+    batch_size: int | None = None,
+    integrator_kwargs=None,
 ) -> Callable:
-    """
-    Create a vectorized and JIT-compiled version of the integrate function using netket.jax.vmap_chunked.
+    """Create a vectorized and JIT-compiled version of the integrate function using jax.lax.map_batched.
 
     Parameters
     ----------
@@ -162,26 +157,27 @@ def create_vmap_integrator(
         The function to be integrated.
     domain : jnp.ndarray
         The domain over which to integrate the function.
-    chunk_size : float, optional
-        The chunk size for vectorization. Default is jnp.inf (no chunking).
+    batch_size : int, optional
+        The batch size for vectorization. Default is jnp.inf (no batching).
 
     Returns
     -------
     Callable
         The vectorized and JIT-compiled version of the integrate function.
+
     """
+    integrator_kwargs = {} if integrator_kwargs is None else integrator_kwargs
     return jax.jit(
-        netket.jax.vmap_chunked(
-            Partial(integrate, integrator, function, domain, **integrator_kwargs),
-            in_axes=0,
-            chunk_size=chunk_size,
-        )
+        lambda xs: jax.lax.map(
+            f=Partial(integrate, integrator, function, domain, **integrator_kwargs),
+            batch_size=batch_size,
+            xs=xs,
+        ),
     )
 
 
 def plot_peak_omega_gw_hist(res, model_name, show_rot=True, is_int=False, labels=None, neff = None, save=True):
-    """
-    Plot the peak gravitational wave energy density spectrum and save the figure.
+    """Plot the peak gravitational wave energy density spectrum and save the figure.
 
     Parameters
     ----------
@@ -202,6 +198,7 @@ def plot_peak_omega_gw_hist(res, model_name, show_rot=True, is_int=False, labels
     "Pessimistic" values. The plot is saved as a PNG file in the "figs"
     directory within the current working directory, with the filename
     constructed using the `model_name`.
+
     """
     if isinstance(res, list):
         log10 = [jnp.log10(result[jnp.nonzero(result)] / (0.674**2)) for result in res]
@@ -218,7 +215,7 @@ def plot_peak_omega_gw_hist(res, model_name, show_rot=True, is_int=False, labels
     fig_dir.mkdir(exist_ok=True)
     if is_int:
         #ax.set_title(f"{model_name} Integrated $\Omega_{{GW}}$")
-        ax.axvline(x=jnp.log10(5.6e-6 * neff * 0.674**-2), label=r"$N_{eff}$ Bound", c="r", linestyle="dashed")
+        ax.axvline(x=jnp.log10(5.6e-6 * neff * 0.674**-2), label=r"$N_{\mathrm{eff}}$ Bound", c="r", linestyle="dashed")
         #ax.legend(loc="best")
         ax.set_xlabel(r"$\log_{10}\Omega_{GW}$")
         if save:
@@ -243,8 +240,7 @@ def plot_peak_omega_gw_hist(res, model_name, show_rot=True, is_int=False, labels
 
 
 def plot_peak_omega_gw_contour(res, model_name, samples):
-    """
-    Plot the peak gravitational wave energy density spectrum using a contour plot.
+    """Plot the peak gravitational wave energy density spectrum using a contour plot.
 
     Parameters
     ----------
@@ -266,8 +262,8 @@ def plot_peak_omega_gw_contour(res, model_name, samples):
     sample points. The plot also includes a colorbar indicating the peak
     log10(Omega_GW) values. The function assumes that the input arrays
     `samples` and `res` have the same shape.
-    """
 
+    """
     fig, ax = plt.subplots()
 
     x, y = jnp.hsplit(samples, 2)
@@ -283,9 +279,9 @@ def plot_peak_omega_gw_contour(res, model_name, samples):
     )
     fig.colorbar(contour, label=r"Peak $\log_{10}\,\Omega_{GW}$")
 
-    ax.set_title(f"{model_name} Peak $\Omega_{{GW}}$")
+    ax.set_title(rf"{model_name} Peak $\Omega_{{GW}}$")
     ax.set_ylabel("log10_A")
     ax.set_xlabel("log10_f_peak")
     fig.savefig(
-        fig_dir / f"{model_name}-peak-omega-2d-contour.png", bbox_inches="tight"
+        fig_dir / f"{model_name}-peak-omega-2d-contour.png", bbox_inches="tight",
     )

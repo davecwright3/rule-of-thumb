@@ -4,20 +4,25 @@
 # In[1]:
 
 
+get_ipython().run_line_magic('load_ext', 'autoreload')
+get_ipython().run_line_magic('autoreload', '2')
 import jax
 import matplotlib.pyplot as plt
 
 jax.config.update("jax_enable_x64", True)
-import gzip
+import logging
 import pathlib
-import pickle
 from itertools import product
 
 import jax.numpy as jnp
 import numpy as np
+import quadax
+from tqdm.auto import tqdm
+
 import utils
-from ptarcade import chains_utils as cu
-from ptarcade import models_utils as mu
+
+logging.getLogger("matplotlib").setLevel(logging.ERROR)
+logging.getLogger("jax").setLevel(logging.ERROR)
 
 
 # In[2]:
@@ -62,24 +67,6 @@ model_dict = {
         "map": jnp.array([-0.92, -0.79, 0.5, 3]),
         "model_params": ["log10_alpha", "log10_T_star", "b", "c"],
     },
-    "SIGW Gauss": {
-        "model": sigw_gauss,
-        "l_bounds": jnp.array([-3, -11, 0.1]),
-        "u_bounds": jnp.array([1, -5, 3]),
-        "l_bounds_post": jnp.array([-1.03, -7.25, 0.51]),
-        "u_bounds_post": jnp.array([0.20, -5.65, 2.07]),
-        "map": jnp.array([-0.34, -7.03, 2.60]),
-        "model_params": ["log10_A", "log10_fpeak", "width"],
-    },
-    "SIGW Box": {
-        "model": sigw_box,
-        "l_bounds": jnp.array([-3, -11, -11]),
-        "u_bounds": jnp.array([1, -5, -5]),
-        "l_bounds_post": jnp.array([-1.72, -6.42, -8.01]),
-        "u_bounds_post": jnp.array([-0.82, -5, -6.97]),
-        "map": jnp.array([-1.26, -5.40, -7.50]),
-        "model_params": ["log10_A", "log10_fmax", "log10_fmin"],
-    },
     "SIGW Delta": {
         "model": sigw_delta,
         "l_bounds": jnp.array([-3, -11]),
@@ -92,10 +79,9 @@ model_dict = {
 }
 
 n = 96721  # Number of draws, has to be prime
-# Set frequency space. Most of the interpolated models in the 15yr only go up
-# to 10**-5 Hz, be aware that this affects integrated energy densities (Neff),
-# but it doesn't impact the rule of thumb calculations.
-freqs = jnp.logspace(-10, 2, 1000)
+# Set frequency space. The interpolated models in the 15yr only go up
+# to 10**-5 Hz so we exclude them here.
+freqs = jnp.logspace(-12, 2, 1000)
 
 
 # In[3]:
@@ -103,32 +89,27 @@ freqs = jnp.logspace(-10, 2, 1000)
 
 results = []
 results_post = []
+results_map = []
 
-for _, model in enumerate(model_dict):
-    print(model)
+out_dir = pathlib.Path.cwd() / "outputs"
+
+for model in (pbar := tqdm(model_dict)):
+    pbar.set_description(f"Working on model {model}")
 
     sub_dict = model_dict[model]
-    func = utils.create_vmap_function(sub_dict["model"].spectrum, freqs)
-
+    
     d = (
         len(sub_dict["l_bounds"])
         if (len(sub_dict["l_bounds"]) == len(sub_dict["u_bounds"]))
         else None
     )
+    
     if not d:
         raise Exception(f"{len(sub_dict['l_bounds'])=} != {len(sub_dict['u_bounds'])=}")
 
-    sampler = utils.create_sampler(d)
+    sampler = utils.create_sampler(d, rng=1738)
     samples = jnp.array(
-        utils.get_samples(sampler, n, sub_dict["l_bounds"], sub_dict["u_bounds"])
-    )
-
-    results.append(func(samples))
-
-    samples = jnp.array(
-        utils.get_samples(
-            sampler, n, sub_dict["l_bounds_post"], sub_dict["u_bounds_post"]
-        )
+        utils.get_samples(sampler, n, sub_dict["l_bounds"], sub_dict["u_bounds"]),
     )
 
     # Add samples at the edges.
@@ -137,13 +118,68 @@ for _, model in enumerate(model_dict):
             samples,
             jnp.array(
                 list(
-                    product(*zip(sub_dict["l_bounds_post"], sub_dict["u_bounds_post"]))
-                )
+                    product(
+                        *zip(sub_dict["l_bounds"], sub_dict["u_bounds"], strict=False)
+                    ),
+                ),
             ),
-        )
+        ),
+    )
+
+    func = utils.create_vmap_function(
+        sub_dict["model"].spectrum, freqs, batch_size=samples.shape[0]
+    )
+
+
+    results.append(func(samples))
+
+    np.savetxt(
+        out_dir / f"{model.replace(' ', '-').lower()}-peak-omega-hist-prior.txt", 
+        jnp.hstack((samples, results[-1][..., None])),
+        header=f"{sub_dict['model_params']}, peak Omega_GW"
+    )
+
+    samples = jnp.array(
+        utils.get_samples(
+            sampler,
+            n,
+            sub_dict["l_bounds_post"],
+            sub_dict["u_bounds_post"],
+        ),
+    )
+
+    # Add samples at the edges.
+    samples = jnp.vstack(
+        (
+            samples,
+            jnp.array(
+                list(
+                    product(
+                        *zip(
+                            sub_dict["l_bounds_post"],
+                            sub_dict["u_bounds_post"],
+                            strict=False,
+                        )
+                    ),
+                ),
+            ),
+        ),
     )
 
     results_post.append(func(samples))
+
+    np.savetxt(
+        out_dir / f"{model.replace(' ', '-').lower()}-peak-omega-hist-post.txt",
+        jnp.hstack((samples, results_post[-1][..., None])),
+        header=f"{sub_dict['model_params']}, peak Omega_GW"
+    )
+
+    results_map.append(func(model_dict[model]["map"][None, ...]))
+    np.savetxt(
+        out_dir / f"{model.replace(' ', '-').lower()}-peak-omega-hist-map.txt",
+        jnp.hstack((model_dict[model]["map"][None, ...], results_map[-1][..., None])),
+        header=f"{sub_dict['model_params']}, peak Omega_GW"
+    )
 
 
 # In[4]:
@@ -156,21 +192,32 @@ plt.rcParams.update(
         "font.family": "serif",
         "font.size": 10,
         "font.serif": "cm",
-    }
+    },
 )
-for i, model in enumerate(model_dict):
+for i, model in enumerate(pba := tqdm(model_dict)):
+    pbar.set_description(f"Working on model {model}")
+
     fig, ax = utils.plot_peak_omega_gw_hist(
-        results[i], model, labels=["Prior"], save=False
+        results[i],
+        model,
+        labels=["Prior"],
+        save=False,
     )
 
-    min_peak, mean_peak, max_peak = jnp.log10(
+    min_peak, max_peak = jnp.log10(
         jnp.array(
-            [results_post[i].min(), results_post[i].mean(), results_post[i].max()]
-        )
+            [results_post[i].min(), results_post[i].max()],
+        ),
     )
 
-    ax.axvspan(min_peak, max_peak, alpha=0.2, color="grey", label="NG15 68\% CI")
-    ax.axvline(mean_peak, color="black", alpha=0.5, label="NG15 MAP", linewidth=2)
+    ax.axvspan(min_peak, max_peak, alpha=0.2, color="grey", label=r"NG15 68\% CI")
+    ax.axvline(
+        jnp.log10(results_map[i]),
+        color="black",
+        alpha=0.5,
+        label="NG15 MAP",
+        linewidth=2,
+    )
     handles, labels = plt.gca().get_legend_handles_labels()
     order = [0, -2, -1, 1, 2, 3]
     ax.legend(
@@ -185,7 +232,7 @@ for i, model in enumerate(model_dict):
     fig_dir = pathlib.Path().cwd() / "figs"
     fig_dir.mkdir(exist_ok=True)
     fig.savefig(
-        fig_dir / f"{model.replace(' ','-').lower()}-peak-omega-hist.pdf",
+        fig_dir / f"{model.replace(' ', '-').lower()}-peak-omega-hist.pdf",
         bbox_inches="tight",
     )
 

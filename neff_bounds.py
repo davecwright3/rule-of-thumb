@@ -4,17 +4,25 @@
 # In[1]:
 
 
+get_ipython().run_line_magic('load_ext', 'autoreload')
+get_ipython().run_line_magic('autoreload', '2')
 import jax
 import matplotlib.pyplot as plt
 
 jax.config.update("jax_enable_x64", True)
+import logging
 import pathlib
-import pickle
 from itertools import product
 
 import jax.numpy as jnp
+import numpy as np
 import quadax
+from tqdm.auto import tqdm
+
 import utils
+
+logging.getLogger("matplotlib").setLevel(logging.ERROR)
+logging.getLogger("jax").setLevel(logging.ERROR)
 
 
 # In[2]:
@@ -23,12 +31,9 @@ import utils
 from models import (
     dw_ds,
     dw_sm,
-    igw,
     pt_bubble,
     pt_sound,
-    sigw_box,
     sigw_delta,
-    sigw_gauss,
 )
 
 model_dict = {
@@ -82,9 +87,7 @@ model_dict = {
 n = 96721  # Number of draws, has to be prime
 # n = 9
 # Set frequency space. Most of the interpolated models in the 15yr only go up
-# to 10**-5 Hz, be aware that this affects integrated energy densities (Neff),
-# but it doesn't impact the rule of thumb calculations. Here I've omitted the models
-# that are interpolated and don't have tabulated values about a frequency limit.
+# to 10**-5 Hz, so we exclude them here.
 freqs = jnp.logspace(-12, 2, 1000)
 
 
@@ -93,9 +96,12 @@ freqs = jnp.logspace(-12, 2, 1000)
 
 results = []
 results_post = []
+results_map = []
 
-for _, model in enumerate(model_dict):
-    print(model)
+out_dir = pathlib.Path.cwd() / "outputs"
+
+for model in (pbar := tqdm(model_dict)):
+    pbar.set_description(f"Working on model {model}")
 
     sub_dict = model_dict[model]
 
@@ -107,25 +113,9 @@ for _, model in enumerate(model_dict):
     if not d:
         raise Exception(f"{len(sub_dict['l_bounds'])=} != {len(sub_dict['u_bounds'])=}")
 
-    sampler = utils.create_sampler(d)
+    sampler = utils.create_sampler(d, rng=1738)
     samples = jnp.array(
-        utils.get_samples(sampler, n, sub_dict["l_bounds"], sub_dict["u_bounds"])
-    )
-
-    func = utils.create_vmap_integrator(
-        quadax.trapezoid,
-        sub_dict["model"].spectrum,
-        freqs,
-        chunk_size=1000,
-        integrator_kwargs={"x": freqs},
-    )
-
-    results.append(func(samples))
-
-    samples = jnp.array(
-        utils.get_samples(
-            sampler, n, sub_dict["l_bounds_post"], sub_dict["u_bounds_post"]
-        )
+        utils.get_samples(sampler, n, sub_dict["l_bounds"], sub_dict["u_bounds"]),
     )
 
     # Add samples at the edges.
@@ -134,13 +124,72 @@ for _, model in enumerate(model_dict):
             samples,
             jnp.array(
                 list(
-                    product(*zip(sub_dict["l_bounds_post"], sub_dict["u_bounds_post"]))
+                    product(
+                        *zip(sub_dict["l_bounds"], sub_dict["u_bounds"], strict=False)
+                    )
                 )
             ),
-        )
+        ),
+    )
+
+    func = utils.create_vmap_integrator(
+        quadax.simpson,
+        sub_dict["model"].spectrum,
+        freqs,
+        batch_size=samples.shape[0],
+        integrator_kwargs={"x": freqs},
+    )
+
+    results.append(func(samples))
+
+    np.savetxt(
+        out_dir / f"{model.replace(' ', '-').lower()}-int-omega-hist-prior.txt", 
+        jnp.hstack((samples, results[-1][..., None])),
+        header=f"{sub_dict['model_params']}, integrated Omega_GW"
+    )
+    
+    samples = jnp.array(
+        utils.get_samples(
+            sampler,
+            n,
+            sub_dict["l_bounds_post"],
+            sub_dict["u_bounds_post"],
+        ),
+    )
+
+    # Add samples at the edges.
+    samples = jnp.vstack(
+        (
+            samples,
+            jnp.array(
+                list(
+                    product(
+                        *zip(
+                            sub_dict["l_bounds_post"],
+                            sub_dict["u_bounds_post"],
+                            strict=False,
+                        )
+                    ),
+                ),
+            ),
+        ),
     )
 
     results_post.append(func(samples))
+
+    np.savetxt(
+        out_dir / f"{model.replace(' ', '-').lower()}-int-omega-hist-post.txt",
+        jnp.hstack((samples, results_post[-1][..., None])),
+        header=f"{sub_dict['model_params']}, integrated Omega_GW"
+    )
+
+    
+    results_map.append(func(model_dict[model]["map"][None, ...]))
+    np.savetxt(
+        out_dir / f"{model.replace(' ', '-').lower()}-int-omega-hist-map.txt",
+        jnp.hstack((model_dict[model]["map"][None, ...], results_map[-1][..., None])),
+        header=f"{sub_dict['model_params']}, integrated Omega_GW"
+    )
 
 
 # In[4]:
@@ -153,38 +202,30 @@ plt.rcParams.update(
         "font.family": "serif",
         "font.serif": "cm",
         "font.size": 10,
-    }
+    },
 )
-for i, model in enumerate(model_dict):
+for i, model in enumerate(pbar := tqdm(model_dict)):
+    pbar.set_description(f"Working on model {model}")
+
     fig, ax = utils.plot_peak_omega_gw_hist(
         results[i],
         model,
-        labels=[f"Prior"],
+        labels=["Prior"],
         save=False,
         is_int=True,
         neff=(2.99 + 0.34) - 3.046,
     )
 
-    func = utils.create_vmap_integrator(
-        quadax.trapezoid,
-        model_dict[model]["model"].spectrum,
-        freqs,
-        chunk_size=1000,
-        integrator_kwargs={"x": freqs},
-    )
-
     # Find the min and max over the 68% CI
     min_peak, max_peak = jnp.log10(
-        jnp.array([results_post[i].min(), results_post[i].max()])
+        jnp.array([results_post[i].min(), results_post[i].max()]),
     )
 
     # Plot it and the MAP value peak
-    ax.axvspan(min_peak, max_peak, alpha=0.2, color="grey", label="NG15 68\% CI")
+    ax.axvspan(min_peak, max_peak, alpha=0.2, color="grey", label=r"NG15 68\% CI")
 
-    # We already have the function, but it expects two dimensions. Just calculate
-    # twice and toss the extra
     ax.axvline(
-        jnp.log10(func(model_dict[model]["map"][None, ...].repeat(2, axis=0))[0]),
+        jnp.log10(results_map[i]),
         color="black",
         alpha=0.5,
         label="NG15 MAP",
@@ -196,7 +237,7 @@ for i, model in enumerate(model_dict):
     fig_dir = pathlib.Path().cwd() / "figs"
     fig_dir.mkdir(exist_ok=True)
     fig.savefig(
-        fig_dir / f"{model.replace(' ','-').lower()}-int-omega-hist.pdf",
+        fig_dir / f"{model.replace(' ', '-').lower()}-int-omega-hist.pdf",
         bbox_inches="tight",
     )
 
